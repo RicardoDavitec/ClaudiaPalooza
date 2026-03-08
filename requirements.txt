@@ -1,0 +1,22 @@
+# ClaudiaPalooza - requirements
+# Observação: `pyzbar` precisa da biblioteca nativa zbar (instalar via pacote do sistema).
+
+pandas
+matplotlib
+seaborn
+reportlab
+
+twilio
+python-dotenv
+
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+
+qrcode[pil]
+pillow
+openpyxl
+
+opencv-python
+pyzbar
+numpy
