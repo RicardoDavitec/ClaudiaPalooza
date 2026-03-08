@@ -41,3 +41,4 @@ Estrutura do repositório
 
 Como contribuir
 - Veja `CONTRIBUTING.md` para orientações.
+# ClaudiaPalooza
