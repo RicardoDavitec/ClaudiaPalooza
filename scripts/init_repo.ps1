@@ -1,6 +1,8 @@
 param(
     [string]$RemoteUrl = 'git@github.com:RicardoDavitec/ClaudiaPalooza.git',
-    [switch]$Push
+    [switch]$Push,
+    [string]$SshKeyPath = 'C:\sshkeys\id_ed25519_claudia_palooza',
+    [string]$SshAgentSock = 'C:\sshkeys\ssh-agent.sock'
 )
 
 Write-Host "== Inicializando repositório local ClaudiaPalooza =="
@@ -29,8 +31,45 @@ git remote remove origin -ErrorAction SilentlyContinue
 git remote add origin $RemoteUrl
 Write-Host "Remote origin definido para: $RemoteUrl"
 
+function Start-SshAgentAndAddKey {
+    param(
+        [string]$KeyPath,
+        [string]$SockPath
+    )
+
+    if (-not (Test-Path $KeyPath)) {
+        Write-Host "Chave SSH não encontrada em: $KeyPath - pulando carregamento de chave."
+        return
+    }
+
+    Write-Host "Tentando iniciar ssh-agent com socket em: $SockPath"
+    try {
+        $env:SSH_AUTH_SOCK = $null
+        $agentOutput = & ssh-agent -a $SockPath -s 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host $agentOutput
+        } else {
+            Write-Host "Falha ao iniciar ssh-agent via processo, tentando serviço Windows..."
+            Start-Service -Name ssh-agent -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+        }
+    } catch {
+        Write-Host "Erro ao iniciar ssh-agent via processo: $_. Tentando serviço Windows..."
+        Start-Service -Name ssh-agent -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
+
+    Write-Host "Adicionando chave ao agente: $KeyPath"
+    try {
+        & ssh-add $KeyPath
+    } catch {
+        Write-Host "ssh-add falhou: $_"
+    }
+}
+
 if ($Push) {
-    Write-Host "Empurrando para o remoto (origin main)..."
+    Write-Host "Preparando ambiente SSH e empurrando para o remoto (origin main)..."
+    Start-SshAgentAndAddKey -KeyPath $SshKeyPath -SockPath $SshAgentSock
     git push -u origin main
 } else {
     Write-Host "Rodar este script com -Push para enviar ao remoto, por exemplo:`n  .\\scripts\\init_repo.ps1 -Push`
