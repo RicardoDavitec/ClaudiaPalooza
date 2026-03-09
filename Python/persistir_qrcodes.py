@@ -85,6 +85,10 @@ def build_map(registro: dict):
                 # assume acompanhante_1
                 entry['acompanhante_1'][dia] = codigo
         m[email] = entry
+        # também indexar por UID se presente no registro
+        uid = c.get('uid')
+        if uid:
+            m[str(uid).strip()] = entry
     return m
 
 
@@ -126,6 +130,36 @@ def main():
 
     registro = load_registro(str(registro_path))
     mapa = build_map(registro)
+    # construir ordem de dias observada no registro (preserva ordem de aparição)
+    dias_ordenados = []
+    for c in registro.get('convidados', []):
+        for qr in c.get('qrcodes', []):
+            if qr.get('tipo') == 'convidado':
+                d = str(qr.get('dia')).strip()
+                if d and d not in dias_ordenados:
+                    dias_ordenados.append(d)
+
+    # mapear colunas Codigo_D1..DN para os dias detectados (se houver menos dias, restante ficará vazio)
+    col_to_dia = {}
+    for i, col in enumerate(DEFAULT_COLUMNS):
+        if col.startswith('Codigo_D'):
+            idx = int(col.split('Codigo_D')[-1]) - 1
+            if idx < len(dias_ordenados):
+                col_to_dia[col] = dias_ordenados[idx]
+            else:
+                col_to_dia[col] = None
+        else:
+            # Codigo_A1_Dx -> map também pelo sufixo Dx
+            parts = col.split('_')
+            if len(parts) == 3 and parts[0].startswith('Codigo') and parts[2].startswith('D'):
+                dia_idx = parts[2].replace('D','')
+                try:
+                    idx = int(dia_idx) - 1
+                    col_to_dia[col] = dias_ordenados[idx] if idx < len(dias_ordenados) else None
+                except Exception:
+                    col_to_dia[col] = None
+            else:
+                col_to_dia[col] = None
 
     creds = service_account.Credentials.from_service_account_file(str(creds_path), scopes=['https://www.googleapis.com/auth/spreadsheets'])
     service = build('sheets', 'v4', credentials=creds)
@@ -166,6 +200,15 @@ def main():
         return
 
     header = values[0]
+
+    # detectar coluna UID (se existir)
+    uid_col = None
+    for idx, h in enumerate(header):
+        if not h:
+            continue
+        if h.strip().lower() == 'uid':
+            uid_col = idx
+            break
 
     # localizar coluna de email (preferir coluna intitulada exatamente 'E-mail')
     email_col = None
@@ -231,17 +274,24 @@ def main():
     # iterar sobre linhas de dados
     for row_idx, row in enumerate(values[1:], start=2):
         # obter email da linha
-        if email_col < len(row):
-            email = row[email_col].strip()
-        else:
-            email = ''
+        # tentar encontrar por UID primeiro (se coluna UID presente)
+        entry = None
+        if uid_col is not None and uid_col < len(row):
+            uid_val = str(row[uid_col]).strip()
+            if uid_val:
+                entry = mapa.get(uid_val)
 
-        if not email:
-            unmatched.append({'row': row_idx, 'reason': 'email vazio', 'row': row})
-            continue
-
-        email_norm = normalize_email(email)
-        entry = mapa.get(email_norm)
+        # fallback para email
+        if entry is None:
+            if email_col < len(row):
+                email = row[email_col].strip()
+            else:
+                email = ''
+            if not email:
+                unmatched.append({'row': row_idx, 'reason': 'email vazio', 'row': row})
+                continue
+            email_norm = normalize_email(email)
+            entry = mapa.get(email_norm)
         if not entry:
             # tentar correspondência por email sem pontos (Gmail-like) e sem tags
             alt = email_norm
@@ -254,21 +304,18 @@ def main():
             unmatched.append({'row': row_idx, 'email': email, 'reason': 'email não encontrado no registro'})
             continue
 
-        # construir valores para as colunas DEFAULT_COLUMNS
+        # construir valores para as colunas DEFAULT_COLUMNS mapeando para as datas reais
         row_values = []
         for col in DEFAULT_COLUMNS:
-            # map col to code
-            if col.startswith('Codigo_D'):
-                dia = col.split('Codigo_D')[-1]
-                val = entry.get('convidado', {}).get(dia, '')
-            else:
-                # Codigo_A1_Dx
-                parts = col.split('_')
-                if len(parts) == 3 and parts[0].startswith('Codigo'):
-                    dia = parts[-1].replace('D','')
-                    val = entry.get('acompanhante_1', {}).get(dia, '')
+            dia_key = col_to_dia.get(col)
+            if dia_key:
+                if col.startswith('Codigo_D'):
+                    val = entry.get('convidado', {}).get(dia_key, '')
                 else:
-                    val = ''
+                    # Codigo_A1_Dx -> acompanhante_1
+                    val = entry.get('acompanhante_1', {}).get(dia_key, '')
+            else:
+                val = ''
             row_values.append(val)
 
         # montar range: col_start-col_end for this row
@@ -421,6 +468,9 @@ def main():
         body = { 'valueInputOption': 'RAW', 'data': data }
         if args.dry_run:
             print(f"ℹ️ Dry-run: {len(data)} linhas seriam atualizadas na aba '{sheet_name}' (simulado). Total a atualizar: {updated_rows}")
+            # mostrar detalhes das primeiras atualizações para inspeção
+            for i, d in enumerate(data[:20], start=1):
+                print(f"  {i}. Range: {d.get('range')}, Values: {d.get('values')}")
         else:
             result = call_with_retry(lambda: service.spreadsheets().values().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute(),
                                      retries=args.retries, backoff_base=args.backoff_base, backoff_max=args.backoff_max)
@@ -504,6 +554,10 @@ def main():
                         for (ridx, r) in block:
                             row_out = []
                             for h in hdr:
+                                # Prefer explicit email column detected earlier for the 'email' field
+                                if h == 'email' and 'email_col' in locals() and email_col is not None and email_col < len(r):
+                                    row_out.append(r[email_col])
+                                    continue
                                 idx = header_idx.get(h)
                                 if idx is not None and idx < len(r):
                                     row_out.append(r[idx])
